@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
-#import uproot
-#import awkward as ak
+import uproot
+import awkward as ak
 import torch
 from sklearn.metrics import roc_curve, roc_auc_score
 import pandas as pd
@@ -48,7 +48,7 @@ def make_ROC_curve(y_test, y_pred_test):
     plt.ylabel('True positive rate')
     #plt.title('ROC curve')
     plt.legend(loc="lower right")
-    #plt.show()
+    plt.show()
     
 
 def plot_classifier_output(y_train, y_pred_train,y_test, y_pred_test, nbins=20, range=(0,1)):
