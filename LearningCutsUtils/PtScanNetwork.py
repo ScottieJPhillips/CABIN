@@ -18,7 +18,8 @@ class PtScanNetwork(torch.nn.Module):
         self.nets = torch.nn.ModuleList([OneToOneLinear(features, self.activation_scale_factor, self.weights, self.post_product_root) for i in range(len(self.pt))])
 
     def forward(self, x):
-        outputs=torch.cat(tuple(self.nets[i](x[i]) for i in range(len(self.pt))),  dim=0)
+        #outputs=torch.cat(tuple(self.nets[i](x[i]) for i in range(len(self.pt))),  dim=0)
+        outputs=[self.nets[i](x[i]) for i in range(len(self.pt))]
         return outputs
 
     def to(self, device):
