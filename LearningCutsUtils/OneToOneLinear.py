@@ -22,6 +22,7 @@ class OneToOneLinear(torch.nn.Module):
         super().__init__()
         self.features = features
         self.trainable_weights=(weights==None or len(weights)!=features)
+        self.pt = []
         if self.trainable_weights:
             if weights==None:
                 print("This network will learn weights and biases, since no weights were supplied.")

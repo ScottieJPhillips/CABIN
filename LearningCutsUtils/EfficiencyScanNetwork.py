@@ -8,17 +8,17 @@ from LearningCutsUtils.OneToOneLinear import OneToOneLinear
 
 
 class EfficiencyScanNetwork(torch.nn.Module):
-    def __init__(self,features,effics,weights=None,activationscale=2.,postroot=1.):
+    def __init__(self,features,effics,weights=None,activationscale=2.):
         super().__init__()
         self.features = features
         self.effics = effics
         self.weights = weights
         self.activation_scale_factor=activationscale
-        self.post_product_root=postroot
-        self.nets = torch.nn.ModuleList([OneToOneLinear(features, self.activation_scale_factor, self.weights, self.post_product_root) for i in range(len(self.effics))])
+        self.nets = torch.nn.ModuleList([OneToOneLinear(features, self.activation_scale_factor, self.weights) for i in range(len(self.effics))])
 
     def forward(self, x):
-        outputs=torch.stack(tuple(self.nets[i](x) for i in range(len(self.effics))))
+        ### returns a list of network outputs with len(effics)
+        outputs=[self.nets[i](x) for i in range(len(self.effics))]
         return outputs
 
     def to(self, device):

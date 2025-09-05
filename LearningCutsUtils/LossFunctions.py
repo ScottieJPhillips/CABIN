@@ -7,22 +7,24 @@ class lossvars():
         self.efficloss = 0
         self.backgloss = 0
         self.cutszloss = 0
-        self.monotloss = 0
-        self.BCEloss = 0
+        self.ptloss = 0
+        self.muloss = 0
+        self.efficfeatloss = 0
         self.signaleffic = 0
         self.backgreffic = 0
     
     def totalloss(self):
-        return self.efficloss + self.backgloss + self.cutszloss + self.monotloss + self.BCEloss
+        return self.efficloss + self.backgloss + self.cutszloss + self.ptloss + self.muloss + self.efficfeatloss
 
     def __add__(self,other):
         third=lossvars()
         third.efficloss = self.efficloss + other.efficloss
         third.backgloss = self.backgloss + other.backgloss
         third.cutszloss = self.cutszloss + other.cutszloss
-        third.monotloss = self.monotloss + other.monotloss
-        third.BCEloss   = self.BCEloss   + other.BCEloss
-        
+        third.ptloss    = self.ptloss    + other.ptloss
+        third.muloss    = self.muloss    + other.muloss
+        third.efficfeatloss = self.efficfeatloss + other.efficfeatloss
+
         if type(self.signaleffic) is list:
             third.signaleffic = self.signaleffic
             third.signaleffic.append(other.signaleffic)
@@ -39,33 +41,14 @@ class lossvars():
             third.backgreffic.append(other.backgreffic)
         return third
 
-
-# Basically a more sophisticated version of S/sqrt(B) or S/B.
-# see https://cds.cern.ch/record/2736148
-def ATLAS_significance_loss(y_pred,y_true,reluncert=0.2):
-    s=y_pred * y_true
-    b=y_pred * (1.-y_true)
-    n=s+b
-    sigma=reluncert*b
-    x=0
-    y=0
-    if sigma>0.0:
-        x=n*torch.log((n*(b+sigma*sigma))/(b*b+n*sigma*sigma))
-        y=(b*b/(sigma*sigma))*torch.log(1+(sigma*sigma*(n-b)/(b*(b+sigma*sigma))))
-    else:
-        # avoid divergence at sigma=0 by approximating ln(1+epsilon)~epsilon
-        x=n*torch.log(n/b)
-        y=(n-b)
-    return -torch.sqrt(2*(x-y))
-
     
-def loss_fn (y_pred, y_true, features, net, 
-             target_signal_efficiency=0.8,
-             alpha=1., beta=1., gamma=0.001, delta=0.,
+def loss_fn (y_pred, y_true, features, 
+             net, target_signal_efficiency,
+             alpha=1., beta=1., gamma=0.001, delta = 0.,
              debug=False):
 
     loss = lossvars()
-
+    
     # signal efficiency: (selected events that are true signal) / (number of true signal)
     signal_results = y_pred * y_true
     loss.signaleffic = torch.sum(signal_results)/torch.sum(y_true)
@@ -74,37 +57,163 @@ def loss_fn (y_pred, y_true, features, net,
     background_results = y_pred * (1.-y_true)
     loss.backgreffic = torch.sum(background_results)/(torch.sum(1.-y_true))
 
-    
-    # force signal efficiency to converge to a target value. should this be a 
-    # relative efficiency difference, instead of absolute?  investigate this.
-    loss.efficloss = alpha*torch.square(target_signal_efficiency-loss.signaleffic)
-
-    # force background efficiency to small values.  will tend to overweight background
-    # effic compared to signal effic since signal effic is squared.  investigate this.
-    # generally prefer for loss functions to be sum-of-squares to ensure loss is convex,
-    # but in this case the background efficiency is strictly positive, and we want to
-    # push it to zero.
-    loss.backgloss = beta*loss.backgreffic
-
-    # also prefer to have the cuts be close to zero, so they're not off at some crazy 
-    # value even if the cut doesn't discriminate much
     cuts=net.get_cuts()
+    
+    # * force signal efficiency to converge to a target value
+    # * force background efficiency to small values at target efficiency value.
+    # * also prefer to have the cuts be close to zero, so they're not off at some crazy 
+    #   value even if we prefer for the cut to not have much impact on the efficiency 
+    #   or rejection.
+    #
+    # should modify the efficiency target requirement here, to make this more 
+    # like consistency with e.g. a gaussian distribution rather than just a penalty 
+    # calculated from r^2 distance.
+    #
+    # for both we should prefer to do something like "sum(square())" or something.
+    loss.efficloss = alpha*torch.square(target_signal_efficiency-loss.signaleffic)
+    loss.backgloss = beta*loss.backgreffic
     loss.cutszloss = gamma*torch.sum(torch.square(cuts))/features
 
-    # calculate the BCE loss, just because.
-    loss.BCEloss = delta*torch.nn.BCELoss()(y_pred, y_true)    
-    
     if debug:
         print(f"Inspecting efficiency loss: alpha={alpha}, target={target_signal_efficiency:4.3f}, subnet_effic={loss.signaleffic:5.4f}, subnet_backg={loss.backgreffic:5.4f}, efficloss={loss.efficloss:4.3e}, backgloss={loss.backgloss:4.3e}")
+    
+    # sanity check in case we ever need it, should work
+    #loss=bce_loss_fn(outputs_to_labels(y_pred,features),y_true)
     
     return loss
 
 
     
 
+def full_loss_fn(y_pred, y_true, features, net,
+                  alpha=1., beta=1., gamma=0.001, delta=0., epsilon=0.001,
+                  debug=False):
+    sumptlosses=None    
+    for i in range(len(net.pt)):
+        for j in range(len(net.mu)):
+            for k in range(len(net.effics)):
+                pt=net.pt[i][0]
+                mu=net.mu[j][0]
+                effic = net.effics[k]
+                subnet = net.nets[i][j][k]
+                l=loss_fn(y_pred[i][j][k], y_true[i][j], features, 
+                          subnet, effic,
+                          alpha, beta, gamma, delta, debug)
+                if sumptlosses==None:
+                    sumptlosses=l
+                else:
+                    sumptlosses = sumptlosses + l
+
+    loss=sumptlosses
+
+    
+
+    if len(net.pt)>=3 and len(net.mu)>=3:
+        featurelosspt = None
+        featurelossmu = None
+        featurelosseffic = None
+        for i in range(1,len(net.pt)-1):
+            for j in range(1,len(net.mu)-1):
+                for k in range(1,len(net.effics)-1):
+                    cuts_ijk   = net.nets[i  ][j  ][k  ].get_cuts()
+                    cuts_im1jk = net.nets[i-1][j  ][k  ].get_cuts()
+                    cuts_ip1jk = net.nets[i+1][j  ][k  ].get_cuts()
+                    cuts_ijm1k = net.nets[i  ][j-1][k  ].get_cuts()
+                    cuts_ijp1k = net.nets[i  ][j+1][k  ].get_cuts()
+                    cuts_ijkm1 = net.nets[i  ][j  ][k-1].get_cuts()
+                    cuts_ijkp1 = net.nets[i  ][j  ][k+1].get_cuts()
+                    flpt = None
+                    flmu = None
+                    fleffic = None
+        
+                    cutrange_pt           =  cuts_ip1jk-cuts_im1jk
+                    mean_pt               = (cuts_ip1jk+cuts_im1jk)/2.
+                    distance_from_mean_pt = (cuts_ijk  -mean_pt)
+                    
+                    cutrange_mu           =  cuts_ijp1k-cuts_ijm1k
+                    mean_mu               = (cuts_ijp1k+cuts_ijm1k)/2.
+                    distance_from_mean_mu = (cuts_ijk  -mean_mu)
+                    
+                    cutrange_effic           =  cuts_ijkp1-cuts_ijkm1
+                    mean_effic               = (cuts_ijkp1+cuts_ijkm1)/2.
+                    distance_from_mean_effic = (cuts_ijk  -mean_effic)                
+                    exponent=2.  
+                    
+                    flpt=(distance_from_mean_pt**exponent)/((cutrange_pt**exponent)+0.1) 
+                    flmu=(distance_from_mean_mu**exponent)/((cutrange_mu**exponent)+0.1) 
+                    fleffic = (distance_from_mean_effic**exponent)/((cutrange_effic**exponent)+0.1)
+                    # -----------------------------------------------------
+                  
+                    if featurelosspt == None:
+                        featurelosspt = flpt
+                    else:
+                        featurelosspt = featurelosspt + flpt
+                        
+                    if featurelossmu == None:
+                        featurelossmu = flmu
+                    else:
+                        featurelossmu = featurelossmu + flmu
+                    
+                    if featurelosseffic == None:
+                        featurelosseffic = fleffic
+                    else:
+                        featurelosseffic = featurelosseffic + fleffic
+                    
+        sumptlosses = torch.sum(featurelosspt)/features
+        summulosses = torch.sum(featurelossmu)/features
+        sumefficfeatlosses = torch.sum(featurelosseffic)/features #/(len(net.pt)-2)
+        loss.ptloss = epsilon*sumptlosses
+        loss.muloss = epsilon*summulosses
+        loss.efficfeatloss = epsilon*sumefficfeatlosses
+
+    ### For pt>=3 and mu<3
+    if len(net.pt)>=3 and len(net.mu)<3:
+        featurelosspt = None
+        featurelosseffic = None
+        for i in range(1,len(net.pt)-1):
+            for j in range(len(net.mu)):
+                for k in range(1,len(net.effics)-1):
+                    cuts_ijk   = net.nets[i  ][j  ][k  ].get_cuts()
+                    cuts_im1jk = net.nets[i-1][j  ][k  ].get_cuts()
+                    cuts_ip1jk = net.nets[i+1][j  ][k  ].get_cuts()
+                    cuts_ijkm1 = net.nets[i  ][j  ][k-1].get_cuts()
+                    cuts_ijkp1 = net.nets[i  ][j  ][k+1].get_cuts()
+                    flpt = None
+                    flmu = None
+                    fleffic = None
+        
+                    cutrange_pt           =  cuts_ip1jk-cuts_im1jk
+                    mean_pt               = (cuts_ip1jk+cuts_im1jk)/2.
+                    distance_from_mean_pt = (cuts_ijk  -mean_pt)
+                    
+                    cutrange_effic           =  cuts_ijkp1-cuts_ijkm1
+                    mean_effic               = (cuts_ijkp1+cuts_ijkm1)/2.
+                    distance_from_mean_effic = (cuts_ijk  -mean_effic)                
+                    exponent=2.  
+                    
+                    flpt=(distance_from_mean_pt**exponent)/((cutrange_pt**exponent)+0.1)
+                    fleffic = (distance_from_mean_effic**exponent)/((cutrange_effic**exponent)+0.1)
+                    # -----------------------------------------------------
+                  
+                    if featurelosspt == None:
+                        featurelosspt = flpt
+                    else:
+                        featurelosspt = featurelosspt + flpt
+                    
+                    if featurelosseffic == None:
+                        featurelosseffic = fleffic
+                    else:
+                        featurelosseffic = featurelosseffic + fleffic
+                    
+        sumptlosses = torch.sum(featurelosspt)/features
+        sumefficfeatlosses = torch.sum(featurelosseffic)/features #/(len(net.pt)-2)
+        loss.ptloss = epsilon*sumptlosses
+        loss.efficfeatloss = epsilon*sumefficfeatlosses
+
+    return loss
 
 def effic_loss_fn(y_pred, y_true, features, net,
-                  alpha=1., beta=1., gamma=0.001, delta=0., epsilon=0.001,
+                  alpha=1., beta=1., gamma=0.001, epsilon=0.001,
                   debug=False):
 
     # probably a better way to do this, but works for now
@@ -114,7 +223,7 @@ def effic_loss_fn(y_pred, y_true, features, net,
         efficnet = net.nets[i]
         l=loss_fn(y_pred[i], y_true, features, 
                   efficnet, effic,
-                  alpha, beta, gamma, delta, debug)
+                  alpha, beta, gamma, debug)
         if sumefficlosses==None:
             sumefficlosses=l
         else:
@@ -189,5 +298,3 @@ def effic_loss_fn(y_pred, y_true, features, net,
         loss.monotloss = epsilon*sumfeaturelosses
 
     return loss
-
-

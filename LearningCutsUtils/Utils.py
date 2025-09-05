@@ -80,14 +80,18 @@ def plotlosses(losses, test_losses):
     plt.plot([l.efficloss.detach().numpy() for l in losses], '.', label="Train: effic")
     plt.plot([l.backgloss.detach().numpy() for l in losses], '.', label="Train: backg")
     plt.plot([l.cutszloss.detach().numpy() for l in losses], '.', label="Train: cutsz")
-    plt.plot([l.BCEloss.detach().numpy() for l in losses], '.', label="Train: BCE")
-    if type(losses[0].monotloss) is not int:
+    # plt.plot([l.BCEloss.detach().numpy() for l in losses], '.', label="Train: BCE")
+    if type(losses[0].ptloss) is not int:
         # this particular term can get very small, just cut it off for super small values
-        plt.plot([max(l.monotloss.detach().numpy(),1e-12) for l in losses], '.', label="Train: smooth")
+        plt.plot([max(l.ptloss.detach().numpy(),1e-12) for l in losses], '.', label="Train: pt smooth")
+    if type(losses[0].efficloss) is not int:
+        # this particular term can get very small, just cut it off for super small values
+        plt.plot([max(l.efficfeatloss.detach().numpy(),1e-12) for l in losses], '.', label="Train: effic smooth")
     plt.legend()
     plt.xlabel('Training Epoch')
     plt.ylabel('Loss')
     plt.yscale('log');
+    
 
 
 def ploteffics(losses, targeteffics):
@@ -246,22 +250,24 @@ def data_concat(fp,fn,tn,feats):
     
     return ak.concatenate(data)
 
-def data_mask(d,e,eta):
+def data_mask(d,e,eta,mu):
     # print('.')
     # takes awk array and converts to numpy and sorts features
-    datalist=['ph.pt', 'ph.eta', 'ph.rhad1', 'ph.reta', 'ph.rphi', 'ph.weta2', 'ph.eratio', 'ph.deltae', 'ph.wstot', 'ph.fside', 'ph.w1', 'ph.truth_pdgId', 'ph.truth_type', 'ph.convFlag']
+    datalist=['ph.pt', 'ph.eta', 'ph.rhad1', 'ph.reta', 'ph.rphi', 'ph.weta2', 'ph.eratio', 'ph.deltae', 'ph.wstot', 'ph.fside', 'ph.w1', 'ph.truth_pdgId', 'ph.truth_type', 'ph.convFlag', 'EventInfo.actualIntPerXing']
     # for i in datalist:
     #     print(f'{i:7f},{len(data[i])},{type(data[i])}')
-    mask = (d['ph.pt'] >= e[0]) & (d['ph.pt'] < e[1]) & (abs(d['ph.eta']) < eta[1]) & (abs(d['ph.eta']) >= eta[0]) & (d['ph.wstot'] >= 0) & (d['ph.w1'] >= 0)
+    mask = (d['ph.pt'] >= e[0]) & (d['ph.pt'] < e[1]) & (abs(d['ph.eta']) < eta[1]) & (abs(d['ph.eta']) >= eta[0]) & (d['ph.wstot'] >= 0) & (d['ph.w1'] >= 0) & (d['ph.convFlag'] == 0)
+    # do unconv for now ph.convFlag == 0
     # print('.')
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8,3))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(8,3))
     
-    myrange_pt = (15,20)
+    myrange_pt = (0,100)
     nbins_pt=20
     binwidth_pt=(myrange_pt[1]-myrange_pt[0])/nbins_pt
     ax1.hist(((d['ph.pt'])/1000)[mask],density=True, bins=nbins_pt, range=myrange_pt,color = 'grey')
     ax1.set_xlabel('Transverse Momentum $p_{\\mathrm{T}}$ [GeV]',loc = 'right')
     ax1.set_ylabel(f"1/N dN/d({'$p_{t}$'})",loc = 'top')
+    plt.tight_layout()
     
     nbins_eta=20
     myrange_eta=(-4,4)
@@ -270,6 +276,15 @@ def data_mask(d,e,eta):
     ax2.set_xlabel('Psuedorapidity $\\eta$',loc = 'right')
     ax2.set_ylabel("1/N dN/d($\\eta$)",loc = 'top')
     plt.tight_layout()
+
+    nbins_mu=20
+    myrange_mu=mu
+    binwidth_mu=(myrange_mu[1]-myrange_mu[0])/nbins_mu
+    ax3.hist(d['EventInfo.actualIntPerXing'][mask],density=True, bins=nbins_mu, range=myrange_mu, color = 'grey')
+    ax3.set_xlabel('Pileup $\\mu$',loc = 'right')
+    ax3.set_ylabel("1/N dN/d($\\mu$)",loc = 'top')
+    plt.tight_layout()
+    
     numpy_data = {}
     
     for i in datalist:
@@ -340,42 +355,124 @@ def plot_feats(d):
 
 
 
-def test_train_split(d,ratio):
+
+def test_train_split(d,pt,mu,ratio):
+
+    
+
+    data_bucket = [[[] for j in range(len(mu))] for i in range(len(pt))]
+    label_bucket = [[[] for j in range(len(mu))] for i in range(len(pt))]
+    dlist = ['ph.rhad1', 'ph.reta', 'ph.rphi', 'ph.weta2', 'ph.eratio', 'ph.deltae', 'ph.wstot', 'ph.fside', 'ph.w1']
     loosetrues = []
     for i in range(len(d['ph.pt'])):
-        if d['ph.truth_pdgId'][i] == 22 and d['ph.truth_type'][i]==15 or d['ph.truth_type'][i]==13 or d['ph.truth_type'][i]==14:
+        if d['ph.truth_pdgId'][i] == 22 and (d['ph.truth_type'][i]==15 or 
+                                             d['ph.truth_type'][i]==13 or
+                                             d['ph.truth_type'][i]==14):
             true = 1
         else:
             true = 0
-        loosetrues.append(true)
-    loosetrues = torch.Tensor(loosetrues)
-    dlist=['ph.rhad1', 'ph.reta', 'ph.rphi', 'ph.weta2', 'ph.eratio', 'ph.deltae', 'ph.wstot', 'ph.fside', 'ph.w1']
-    x_train_list = []
-
-    for i in dlist:
-        x_train_array = torch.from_numpy(d[i])
-        x_train_list.append(x_train_array)
+        
+        for j in range(len(pt)):
+            for k in range(len(mu)):
+                if (d['ph.pt'][i] >= pt[j][0] and d['ph.pt'][i] < pt[j][1]) \
+                & (d['EventInfo.actualIntPerXing'][i] >= mu[k][0] and d['EventInfo.actualIntPerXing'][i] < mu[k][1]):
     
-    x_train_tensor = torch.stack(x_train_list)
+                    label_bucket[j][k].append(true)
+                    data_bucket[j][k].append([d[key][i] for key in dlist])
+                    break
 
+    loosetrues = torch.Tensor(loosetrues)
+    
+    x_train_tensor_list = [[[] for j in range(len(mu))] for i in range(len(pt))]
+    x_test_tensor_list = [[[] for j in range(len(mu))] for i in range(len(pt))]
+    y_train_tensor_list = [[[] for j in range(len(mu))] for i in range(len(pt))]
+    y_test_tensor_list = [[[] for j in range(len(mu))] for i in range(len(pt))]
     
     from sklearn.model_selection import train_test_split
-
-    X_train, X_test, y_train, y_test = train_test_split(x_train_tensor.T,loosetrues, test_size=ratio, random_state=42)
-    
     from sklearn.preprocessing import StandardScaler
-    sc = StandardScaler()
     
-    X_train = sc.fit_transform(X_train)
-    X_test = sc.transform(X_test)
+    sc_list = [[StandardScaler() for j in range(len(mu))] for i in range(len(pt))]
     
-    x_train_tensor = torch.tensor(X_train, dtype=torch.float).detach()
-    y_train_tensor=y_train
-    
-    x_test_tensor = torch.tensor(X_test, dtype=torch.float).detach()
-    y_test_tensor=y_test
-    return x_train_tensor, y_train_tensor, x_test_tensor, y_test_tensor
+    for i in range(len(pt)):
+        for j in range(len(mu)):
+            # print(len(data_bucket[i][j]))
+            X = np.array(data_bucket[i][j], dtype=np.float32)
+            Y = np.array(label_bucket[i][j], dtype=np.float32)
+            X_train, X_test, y_train, y_test = train_test_split(X,Y, test_size=ratio, random_state=42)
+            
+        
+            
+            
+            X_train = sc_list[i][j].fit_transform(X_train)
+            X_test = sc_list[i][j].transform(X_test)
+            
+            x_train_tensor_list[i][j] = torch.tensor(X_train, dtype=torch.float).detach()
+            y_train_tensor_list[i][j] = torch.tensor(y_train, dtype=torch.float).detach()
+            
+            x_test_tensor_list[i][j] = torch.tensor(X_test, dtype=torch.float).detach()
+            y_test_tensor_list[i][j] = torch.tensor(y_test, dtype=torch.float).detach()
+        
+    return x_train_tensor_list, y_train_tensor_list, x_test_tensor_list, y_test_tensor_list, sc_list
 
+def cutsheatmap(net):
+    latex_string = ['$R_{{had}}$','$R_{{\\eta}}$','$R_{{\\phi}}$','$w_{{\\eta^{{2}}}}$','$E_{{ratio}}$','$\\Delta E [MeV]$','$w^{{tot}}_{{\\eta 1}}$','$F_{{side}}$','$w_{{\\eta^{{3}}_{{\\eta 1}}}}$']
+    fig, axes = plt.subplots(nrows=3, ncols=3, figsize=(12,9))
+    targeteffics=net.effics
+    pt=net.pt
+    m=net.features
+    
+    scaled_cuts=[[[[0] for _ in range(len(targeteffics))] for _ in range(len(pt))] for i in range(m)]
+    for i in range(len(pt)):
+        for j in range(len(targeteffics)):
+            cuts=net.nets[i][j].get_cuts().detach().numpy()
+            for f in range(m):
+                cutval=cuts[f]
+                scaled_cuts[f][i][j]=cutval
+    
+    
+    for b, ax in enumerate(axes.flatten()):
+        im = ax.imshow([[scaled_cuts[b][i][j] for j in range(len(targeteffics))]for i in range(len(pt))])
+        cbar = plt.colorbar(im, ax=ax)
+        # cbar.set_label("Scaled Cut Val", fontsize=10)
+        # Show all ticks and label them with the respective list entries
+        ax.set_xticks(range(len(targeteffics)), labels=targeteffics,)
+        ax.set_yticks(range(len(pt)), labels=pt)
+        
+        # # Loop over data dimensions and create text annotations.
+        # for i in range(len(pt)):
+        #     for j in range(len(targeteffics)):
+        #         # text = ax.text(j, i, scaled_cuts[b][i][j],
+        #         #                ha="center", va="center", color="w")
+        
+        ax.set_title(f"Cuts Over Pt and Efficency for {latex_string[b]}")
+    fig.tight_layout()
+
+def make_ROC_curves(y_test,x_test, net):
+    net.eval() # configure the model for evaluation (testing)
+    pt=net.pt
+    effics = net.effics
+    m=net.features
+    y_pred = net(x_test)
+    fig, axes = plt.subplots(nrows=len(pt), ncols=len(effics), figsize=(12,12))
+    for i in range(len(pt)):
+        for j in range(len(effics)):
+            ax = axes[i, j]
+            y_pred_ij = y_pred[i][j].detach().numpy()
+            y_test_i = y_test[i]
+            # print(len(y_pred_ij),len(y_test_i))
+            fpr, tpr, thresholds = roc_curve(y_test_i, y_pred_ij)
+            roc_auc = roc_auc_score(y_test_i, y_pred_ij)
+            
+            lw = 2
+            ax.plot(fpr, tpr, color="darkorange", label="AUC = {:.3f}".format(roc_auc))
+            ax.plot([0, 1], [0, 1], color="navy", lw=lw, linestyle="--")
+            ax.set_xlim([0.0, 1.0])
+            ax.set_ylim([0.0, 1.05])
+            # ax.set_xlabel('False positive rate')
+            # ax.set_ylabel('True positive rate')
+            ax.set_title(f'pt={pt[i]} \n effic={effics[j]}')
+            ax.legend(loc="lower right")
+    fig.tight_layout()
 
 def check_noisy_test_inputs(x_test_tensor, y_test_tensor, net, weights, targeteffic=0.95, noiserate=0.10):
     x_test_tensor_noisy = noisify(x_test_tensor, y_test_tensor, weights, noiserate)
